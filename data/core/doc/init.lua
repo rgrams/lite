@@ -131,15 +131,6 @@ function Doc:selection_contains(line)
 end
 
 
-function Doc:get_selection_ranges(sort)
-  local out = {}
-  for i,selection in ipairs(self.selections) do
-    table.insert(out, {selection:get(sort)})
-  end
-  return out
-end
-
-
 function Doc:get_selection(sort)
   return self.selections[1]:get(sort)
 end
@@ -332,16 +323,17 @@ function Doc:text_input(text)
   if self:has_selection() then
     self:delete_to()
   end
-  for i,range in ipairs(self:get_selection_ranges()) do
-    self:insert(range[1], range[2], text)
+  for i,selection in ipairs(self.selections) do
+    local line, col = selection:get()
+    self:insert(line, col, text)
     self:move_to(#text)
   end
 end
 
 
 function Doc:replace(fn)
-  for i,range in ipairs(self:get_selection_ranges(true)) do
-    local line1, col1, line2, col2, swap = table.unpack(range)
+  for i,selection in ipairs(self.selections) do
+    local line1, col1, line2, col2, swap = selection:get(true)
     local old_text = self:get_text(line1, col1, line2, col2)
     local new_text, n = fn(old_text)
     if old_text ~= new_text then
@@ -359,8 +351,8 @@ end
 
 
 function Doc:delete_to(...)
-  for i,range in ipairs(self:get_selection_ranges(true)) do
-    local line1, col1, line2, col2, swap = table.unpack(range)
+  for i,selection in ipairs(self.selections) do
+    local line1, col1, line2, col2, swap = selection:get()
     local had_selection = not (line1 == line2 and col1 == col2)
     if had_selection then
       self:remove(line1, col1, line2, col2)
@@ -375,8 +367,8 @@ end
 
 
 function Doc:move_to(...)
-  for i,range in ipairs(self:get_selection_ranges(true)) do
-    local line, col = range[1], range[2]
+  for i,selection in ipairs(self.selections) do
+    local line, col = selection:get(true)
     line, col = self:position_offset(line, col, ...)
     self:set_selection(line, col, nil, nil, nil, i)
   end
@@ -384,8 +376,8 @@ end
 
 
 function Doc:select_to(...)
-  for i,range in ipairs(self:get_selection_ranges()) do
-    local line, col, line2, col2 = table.unpack(range)
+  for i,selection in ipairs(self.selections) do
+    local line, col, line2, col2 = selection:get()
     line, col = self:position_offset(line, col, ...)
     self:set_selection(line, col, line2, col2, nil, i)
   end
