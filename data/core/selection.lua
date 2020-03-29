@@ -20,7 +20,6 @@ function Selection:set(line1, col1, line2, col2, swap)
   line2, col2 = self.doc:sanitize_position(line2 or line1, col2 or col1)
   self.a.line, self.a.col = line1, col1
   self.b.line, self.b.col = line2, col2
-  core.log(string.format("%s, %s, %s, %s   %s, %s, %s, %s", l1, c1, l2, c2, self.a.line, self.a.col, self.b.line, self.b.col))
 end
 
 
