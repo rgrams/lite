@@ -1,6 +1,7 @@
 local Object = require "core.object"
 local config = require "core.config"
 local common = require "core.common"
+local Selection = require "core.selection"
 
 
 local Doc = Object:extend()
@@ -45,7 +46,7 @@ end
 
 function Doc:reset()
   self.lines = { "\n" }
-  self.selection = { a = { line=1, col=1 }, b = { line=1, col=1 } }
+  self.selections = { Selection(self) }
   self.undo_stack = { idx = 1 }
   self.redo_stack = { idx = 1 }
   self.clean_change_id = 1
@@ -104,42 +105,55 @@ function Doc:get_change_id()
 end
 
 
-function Doc:set_selection(line1, col1, line2, col2, swap)
+function Doc:set_selection(line1, col1, line2, col2, swap, idx)
   assert(not line2 == not col2, "expected 2 or 4 arguments")
-  if swap then line1, col1, line2, col2 = line2, col2, line1, col1 end
-  line1, col1 = self:sanitize_position(line1, col1)
-  line2, col2 = self:sanitize_position(line2 or line1, col2 or col1)
-  self.selection.a.line, self.selection.a.col = line1, col1
-  self.selection.b.line, self.selection.b.col = line2, col2
+  idx = idx or 1
+  assert(idx > 0 and idx <= #self.selections, "out-of-range index: '" .. idx .. "'")
+  local selection = self.selections[idx]
+  selection:set(line1, col1, line2, col2, swap)
 end
 
 
 local function sort_positions(line1, col1, line2, col2)
-  if line1 > line2
-  or line1 == line2 and col1 > col2 then
+  if line1 > line2 or (line1 == line2 and col1 > col2) then
     return line2, col2, line1, col1, true
   end
   return line1, col1, line2, col2, false
 end
 
 
-function Doc:get_selection(sort)
-  local a, b = self.selection.a, self.selection.b
-  if sort then
-    return sort_positions(a.line, a.col, b.line, b.col)
+function Doc:selection_contains(line)
+  for i,selection in ipairs(self.selections) do
+    if selection:contains(line) then
+      return true
+    end
   end
-  return a.line, a.col, b.line, b.col
+end
+
+
+function Doc:get_selection_ranges(sort)
+  local out = {}
+  for i,selection in ipairs(self.selections) do
+    table.insert(out, {selection:get(sort)})
+  end
+  return out
+end
+
+
+function Doc:get_selection(sort)
+  return self.selections[1]:get(sort)
 end
 
 
 function Doc:has_selection()
-  local a, b = self.selection.a, self.selection.b
-  return not (a.line == b.line and a.col == b.col)
+  return self.selections[1]:exists()
 end
 
 
 function Doc:sanitize_selection()
-  self:set_selection(self:get_selection())
+  for i,selection in ipairs(self.selections) do
+    selection:set(selection:get())
+  end
 end
 
 
@@ -290,8 +304,9 @@ local function pop_undo(self, undo_stack, redo_stack)
     remove(self, redo_stack, cmd.time, table.unpack(cmd))
 
   elseif cmd.type == "selection" then
-    self.selection.a.line, self.selection.a.col = cmd[1], cmd[2]
-    self.selection.b.line, self.selection.b.col = cmd[3], cmd[4]
+    local selection = self.selections[1]
+    selection.a.line, selection.a.col = cmd[1], cmd[2]
+    selection.b.line, selection.b.col = cmd[3], cmd[4]
   end
 
   -- if next undo command is within the merge timeout then treat as a single
@@ -317,28 +332,26 @@ function Doc:text_input(text)
   if self:has_selection() then
     self:delete_to()
   end
-  local line, col = self:get_selection()
-  self:insert(line, col, text)
-  self:move_to(#text)
+  for i,range in ipairs(self:get_selection_ranges()) do
+    self:insert(range[1], range[2], text)
+    self:move_to(#text)
+  end
 end
 
 
 function Doc:replace(fn)
-  local line1, col1, line2, col2, swap
-  local had_selection = self:has_selection()
-  if had_selection then
-    line1, col1, line2, col2, swap = self:get_selection(true)
-  else
-    line1, col1, line2, col2 = 1, 1, #self.lines, #self.lines[#self.lines]
-  end
-  local old_text = self:get_text(line1, col1, line2, col2)
-  local new_text, n = fn(old_text)
-  if old_text ~= new_text then
-    self:insert(line2, col2, new_text)
-    self:remove(line1, col1, line2, col2)
-    if had_selection then
-      line2, col2 = self:position_offset(line1, col1, #new_text)
-      self:set_selection(line1, col1, line2, col2, swap)
+  for i,range in ipairs(self:get_selection_ranges(true)) do
+    local line1, col1, line2, col2, swap = table.unpack(range)
+    local old_text = self:get_text(line1, col1, line2, col2)
+    local new_text, n = fn(old_text)
+    if old_text ~= new_text then
+      self:insert(line2, col2, new_text)
+      self:remove(line1, col1, line2, col2)
+      local had_selection = not (line1 == line2 and col1 == col2)
+      if had_selection then
+        line2, col2 = self:position_offset(line1, col2, #new_text)
+        self:set_selection(line1, col1, line2, col2, swap, i)
+      end
     end
   end
   return n
@@ -346,29 +359,36 @@ end
 
 
 function Doc:delete_to(...)
-  local line, col = self:get_selection(true)
-  if self:has_selection() then
-    self:remove(self:get_selection())
-  else
-    local line2, col2 = self:position_offset(line, col, ...)
-    self:remove(line, col, line2, col2)
-    line, col = sort_positions(line, col, line2, col2)
+  for i,range in ipairs(self:get_selection_ranges(true)) do
+    local line1, col1, line2, col2, swap = table.unpack(range)
+    local had_selection = not (line1 == line2 and col1 == col2)
+    if had_selection then
+      self:remove(line1, col1, line2, col2)
+    else
+      line2, col2 = self:position_offset(line1, col1, ...)
+      self:remove(line1, col1, line2, col2)
+      line1, col1 = sort_positions(line1, col1, line2, col2)
+    end
+    self:set_selection(line1, col1, nil, nil, nil, i)
   end
-  self:set_selection(line, col)
 end
 
 
 function Doc:move_to(...)
-  local line, col = self:get_selection()
-  self:set_selection(self:position_offset(line, col, ...))
+  for i,range in ipairs(self:get_selection_ranges(true)) do
+    local line, col = range[1], range[2]
+    line, col = self:position_offset(line, col, ...)
+    self:set_selection(line, col, nil, nil, nil, i)
+  end
 end
 
 
 function Doc:select_to(...)
-  local line, col, line2, col2 = self:get_selection()
-  line, col = self:position_offset(line, col, ...)
-  self:set_selection(line, col, line2, col2)
+  for i,range in ipairs(self:get_selection_ranges()) do
+    local line, col, line2, col2 = table.unpack(range)
+    line, col = self:position_offset(line, col, ...)
+    self:set_selection(line, col, line2, col2, nil, i)
+  end
 end
-
 
 return Doc
